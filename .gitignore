@@ -1,0 +1,42 @@
+# Create .gitignore using PowerShell
+@"
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# Environment files (CRITICAL - don't commit secrets!)
+.env
+.env.*
+*.env
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+bots/*/__pycache__/
+bots/*/.env
+!bots/*/.env.example
+"@ | Out-File -FilePath .gitignore -Encoding utf8
