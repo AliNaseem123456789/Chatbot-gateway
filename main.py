@@ -9,12 +9,12 @@ from datetime import datetime
 from bots.salt_bot import SaltBot
 from bots.ecommerce_bot import EcommerceBot
 # from bots.ecommerce_bot import EcommerceBot  # Add others similarly
-# from bots.realestate_bot import RealEstateBot
+from bots.realestate_bot import RealEstateBot
 # from bots.smoking_bot import SmokingBot
 
 app = FastAPI(title="Multi-Chatbot Gateway", description="Single server for multiple website chatbots")
 
-# Enable CORS for all domains
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Configure for your specific domains
@@ -27,13 +27,11 @@ app.add_middleware(
 bots = {
     "salt": SaltBot(),
     "ecommerce": EcommerceBot(),
-    # "realestate": RealEstateBot(),
+    "realestate": RealEstateBot(),
     # "smoking": SmokingBot(),
 }
 
 print(f"\n✅ Loaded {len(bots)} bots: {', '.join(bots.keys())}\n")
-
-# --- REQUEST/RESPONSE MODELS ---
 class ChatRequest(BaseModel):
     message: str
     user_id: Optional[str] = None
