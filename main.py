@@ -10,14 +10,14 @@ from bots.salt_bot import SaltBot
 from bots.ecommerce_bot import EcommerceBot
 # from bots.ecommerce_bot import EcommerceBot  # Add others similarly
 from bots.realestate_bot import RealEstateBot
-# from bots.smoking_bot import SmokingBot
+from bots.smoking import SmokingBot
 
 app = FastAPI(title="Multi-Chatbot Gateway", description="Single server for multiple website chatbots")
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for your specific domains
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,10 +28,10 @@ bots = {
     "salt": SaltBot(),
     "ecommerce": EcommerceBot(),
     "realestate": RealEstateBot(),
-    # "smoking": SmokingBot(),
+    "smoking": SmokingBot(),
 }
 
-print(f"\n✅ Loaded {len(bots)} bots: {', '.join(bots.keys())}\n")
+print(f"\nLoaded {len(bots)} bots: {', '.join(bots.keys())}\n")
 class ChatRequest(BaseModel):
     message: str
     user_id: Optional[str] = None

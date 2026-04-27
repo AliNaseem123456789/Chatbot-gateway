@@ -35,6 +35,8 @@ logs/
 .DS_Store
 Thumbs.db
 
+run.txt
+
 # Project specific
 bots/*/__pycache__/
 bots/*/.env
