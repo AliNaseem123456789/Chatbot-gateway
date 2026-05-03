@@ -28,7 +28,7 @@ class SmokingBot:
         supabase_url = os.getenv("SMOKING_SUPABASE_URL")
         supabase_key = os.getenv("SMOKING_SUPABASE_KEY")
         if not supabase_url or not supabase_key:
-            print("⚠️ Warning: Smoking Supabase credentials not set")
+            print("Warning: Smoking Supabase credentials not set")
             self.supabase = None
         else:
             self.supabase: Client = create_client(supabase_url, supabase_key)
@@ -36,7 +36,7 @@ class SmokingBot:
         # Load ONLY static policies and FAQs (NO product/brand data)
         self.documents = self.load_document_context()
         
-        print(f"✅ {self.name} initialized (database-first mode)")
+        print(f"{self.name} initialized (database-first mode)")
     
     def load_document_context(self) -> Dict[str, str]:
         """Load ONLY static documentation - policies, FAQs, contact info"""
@@ -87,9 +87,7 @@ class SmokingBot:
                 Phone: (555) 123-4567 | Hours: Mon-Fri 9am-6pm EST
             """
         }
-    
-    # ============ DATABASE QUERIES (Live Data) ============
-    
+
     async def get_brands(self) -> List[Dict]:
         """Get all brands from database"""
         if not self.supabase:
@@ -186,8 +184,7 @@ class SmokingBot:
     async def get_user_orders(self, user_id: str, limit: int = 5) -> List[Dict]:
         """Get user's order history - LIVE DATA"""
         if not self.supabase:
-            return []
-        
+            return []        
         try:
             results = self.supabase.table("orders")\
                 .select("id, status, total_amount, created_at, business_name")\
@@ -211,8 +208,6 @@ class SmokingBot:
         except Exception as e:
             print(f"Orders DB error: {e}")
             return []
-    
-    # ============ INTENT CLASSIFICATION ============
     
     def classify_intent(self, message: str) -> str:
         """Classify user intent based on keywords"""
