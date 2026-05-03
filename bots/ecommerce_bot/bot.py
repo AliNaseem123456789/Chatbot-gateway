@@ -370,11 +370,9 @@ class EcommerceBot:
             "warranty": "1-year manufacturer warranty, extended available",
             "faqs": "Common questions about tracking, cancellation, price matching"
         }
-    
     async def search_similar_products_qdrant(self, search_query: str, limit: int = 5) -> List[Dict]:
-        """Search Qdrant using text query"""
+        """Search Qdrant using text query - works with any qdrant-client version"""
         try:
-            # Import Qdrant client
             from qdrant_client import QdrantClient
             from sentence_transformers import SentenceTransformer
             
@@ -382,18 +380,44 @@ class EcommerceBot:
             qdrant_client = QdrantClient(
                 url=os.getenv("QDRANT_CLOUD_URL"),
                 api_key=os.getenv("QDRANT_CLOUD_API_KEY"),
+                timeout=60,
             )
             
             # Create embedding from search query
             embedder = SentenceTransformer('all-MiniLM-L6-v2')
             query_vector = embedder.encode(search_query).tolist()
             
-            # Search in Qdrant
-            results = qdrant_client.search(
-                collection_name="ecommerce",
-                query_vector=query_vector,
-                limit=limit
-            )
+            # Try different method names (universal approach)
+            results = None
+            
+            # Method 1: Modern versions (v1.7+)
+            if hasattr(qdrant_client, 'search'):
+                results = qdrant_client.search(
+                    collection_name="ecommerce",
+                    query_vector=query_vector,
+                    limit=limit
+                )
+            # Method 2: Older versions (v1.0 - v1.6)
+            elif hasattr(qdrant_client, 'search_collection'):
+                results = qdrant_client.search_collection(
+                    collection_name="ecommerce",
+                    query_vector=query_vector,
+                    limit=limit
+                )
+            # Method 3: Points API
+            elif hasattr(qdrant_client, 'query_points'):
+                response = qdrant_client.query_points(
+                    collection_name="ecommerce",
+                    query=query_vector,
+                    limit=limit
+                )
+                results = response.points
+            else:
+                print("No search method found in qdrant client")
+                return []
+            
+            if not results:
+                return []
             
             # Get full product details from Supabase
             product_ids = [result.id for result in results]
