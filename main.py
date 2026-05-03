@@ -119,7 +119,7 @@ def get_capabilities(bot) -> List[str]:
         caps.append("pdf")
     return caps
 
-# ============ TEXT CHAT ENDPOINTS ============
+#  TEXT CHAT ENDPOINTS
 
 @app.post("/api/chat/{bot_id}", response_model=ChatResponse)
 async def chat_with_bot(bot_id: str, request: ChatRequest):
@@ -213,12 +213,28 @@ async def chat_with_image(
     message: Optional[str] = Form("What is this product?"),
     user_id: Optional[str] = Form(None)
 ):
-    """
-    Send image to bot for analysis
-    Accepts image files (jpg, png, etc.)
-    """
     try:
-        image_bytes = await image.read()        
+        image_bytes = await image.read()
+        
+        # Compress image to reduce memory
+        from PIL import Image
+        import io
+        
+        # Open and compress
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # Resize if too large
+        max_size = 800
+        if img.width > max_size or img.height > max_size:
+            img.thumbnail((max_size, max_size))
+        
+        # Compress to JPEG
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=60)  # Lower quality
+        image_bytes = buffer.getvalue()
+        
+        print(f"Compressed image: {len(image_bytes)/1024:.1f}KB")
+        
         result = await handle_multimodal_request(
             bot_id,
             "image",
@@ -236,12 +252,9 @@ async def chat_with_image(
             "timestamp": datetime.now().isoformat()
         }
         
-    except HTTPException:
-        raise
     except Exception as e:
         print(f"Image endpoint error: {e}")
         raise HTTPException(status_code=500, detail=f"Image processing failed: {str(e)}")
-
 #PDF ENDPOINTS 
 
 @app.post("/api/chat/{bot_id}/pdf")
