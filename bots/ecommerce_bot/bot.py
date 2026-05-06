@@ -68,6 +68,8 @@ class EcommerceBot:
         try:
             from qdrant_client import QdrantClient
             from sentence_transformers import SentenceTransformer
+            import qdrant_client
+            print(f"📦 Qdrant client version: {qdrant_client.__version__}")
             
             self.qdrant_client = QdrantClient(
                 url=os.getenv("QDRANT_CLOUD_URL"),
