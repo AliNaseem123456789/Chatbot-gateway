@@ -165,45 +165,80 @@ class EcommerceBot:
             return None
     
     async def semantic_search_qdrant(self, search_query: str, limit: int = 5) -> List[Dict]:
-        """Improved semantic search using vector embeddings"""
+        """Improved semantic search using vector embeddings - Version Resilient"""
+        # 1. Safety check for initialization
         if not self.qdrant_client or not self.embedder:
+            print("⚠️ Qdrant components not initialized, falling back to keyword search")
             return await self.get_products(search=search_query, limit=limit)
         
         try:
+            # 2. Generate embedding
             query_vector = self.embedder.encode(search_query).tolist()
             
-            results = self.qdrant_client.search(
-                collection_name="ecommerce_products",
-                query_vector=query_vector,
-                limit=limit,
-                score_threshold=0.4
-            )
-            
+            # 3. Flexible Search Execution (Fixes the Railway 'attribute' error)
+            results = None
+            client = self.qdrant_client
+            collection = "ecommerce_products" # Ensure this matches your Qdrant Cloud dashboard
+
+            try:
+                if hasattr(client, 'query_points'): # Modern (v1.10+)
+                    response = client.query_points(
+                        collection_name=collection,
+                        query=query_vector,
+                        limit=limit,
+                        score_threshold=0.4
+                    )
+                    results = response.points
+                elif hasattr(client, 'search'): # Standard (v1.0+)
+                    results = client.search(
+                        collection_name=collection,
+                        query_vector=query_vector,
+                        limit=limit,
+                        score_threshold=0.4
+                    )
+            except Exception as search_err:
+                print(f"❌ Qdrant search execution failed: {search_err}")
+                return []
+
             if not results:
                 return []
             
-            product_ids = [result.id for result in results]
+            # 4. Extract IDs (Handling different result object types)
+            product_ids = []
+            scores = {}
+            for res in results:
+                # Some versions use res.id, some use res.uuid
+                p_id = getattr(res, 'id', None)
+                if p_id:
+                    product_ids.append(p_id)
+                    scores[p_id] = getattr(res, 'score', 0)
+
+            # 5. Batch Fetch from Supabase
+            if not product_ids:
+                return []
+
             products = self.supabase.table("products")\
                 .select("product_id, name, description, price, stock, avg_rating")\
                 .in_("product_id", product_ids)\
                 .execute()
             
-            product_dict = {p['product_id']: p for p in products.data}
+            # 6. Enrich and Sort (Maintaining the original vector search order)
+            product_dict = {str(p['product_id']): p for p in products.data}
             enriched_results = []
             
-            for result in results:
-                if result.id in product_dict:
-                    product = product_dict[result.id].copy()
-                    product['similarity_score'] = result.score
+            for p_id in product_ids:
+                str_id = str(p_id)
+                if str_id in product_dict:
+                    product = product_dict[str_id].copy()
+                    product['similarity_score'] = scores.get(p_id, 0)
                     product['search_type'] = 'semantic'
                     enriched_results.append(product)
             
             return enriched_results
             
         except Exception as e:
-            print(f"Semantic search error: {e}")
+            print(f"🛑 Critical Semantic search error: {e}")
             return []
-    
     async def hybrid_search(self, query: str, limit: int = 5) -> List[Dict]:
         """Hybrid search combining vector and keyword results"""
         if not self.qdrant_client or not self.embedder:
