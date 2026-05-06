@@ -10,332 +10,15 @@ import requests
 from groq import Groq
 from supabase import create_client, Client
 from dotenv import load_dotenv
-
+import uuid
+import warnings
+# Or this (if . doesn't work):
+from bots.ecommerce_bot.RagPipelines.MultimodalSupport.multimodal_processor import GroqOnlyMultimodalProcessor 
+from bots.ecommerce_bot.RagPipelines.Rewriting.QueryRewriter import QueryRewritingPipeline
+from bots.ecommerce_bot.RagPipelines.Intent.IntentClassifier import IntentClassifier, IntentType
+# from logger import logging
+from bots.ecommerce_bot.logger import setup_logger
 load_dotenv("bots/ecommerce_bot/.env")
-
-class GroqOnlyMultimodalProcessor:
-    """Use Groq for all multimodal processing with current models"""
-    
-    def __init__(self, groq_client):
-        self.groq_client = groq_client
-        self.text_model = "llama-3.1-8b-instant"  # Fast text model
-        self.vision_model = "meta-llama/llama-4-scout-17b-16e-instruct"          
-        self.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY")
-        self.assemblyai_api_key = os.getenv("ASSEMBLYAI_API_KEY")
-        self.hf_api_key = os.getenv("HUGGINGFACE_API_KEY")
-    
-    async def process_image_with_groq(self, image_data: Union[str, bytes, Path], 
-                                    query: str = None) -> str:
-        """Process image using Groq's Llama-4 Scout vision model"""
-        try:
-            if isinstance(image_data, str):
-                if image_data.startswith(('http://', 'https://')):
-                    response = requests.get(image_data, timeout=10)
-                    response.raise_for_status()
-                    image_data = response.content
-                elif Path(image_data).exists():
-                    with open(image_data, 'rb') as f:
-                        image_data = f.read()
-            base64_image = base64.b64encode(image_data).decode('utf-8')            
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"""You are a product analyst. Look at this image and answer these questions in a natural way:
-
-    1. What product do you see? (Be specific - laptop, smartphone, headphones, etc.)
-    2. What color is it?
-    3. Can you identify the brand? (Look for logos)
-    4. What notable features do you see?
-    5. What condition does it appear to be in?
-
-    Customer asked: {query if query else 'What is this product?'}
-
-    Write a helpful response describing what you see in the image. Be conversational and specific."""
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
-                            }
-                        }
-                    ]
-                }
-            ]
-            
-            # Call Groq with vision model
-            completion = self.groq_client.chat.completions.create(
-                model=self.vision_model,
-                messages=messages,
-                max_tokens=500,
-                temperature=0.4
-            )
-            
-            response_text = completion.choices[0].message.content            
-            structured_prompt = f"""
-            Based on this description: "{response_text}"
-            
-            Extract the key information as a JSON object. Return ONLY valid JSON:
-            {{
-                "product_type": "main product category",
-                "brand": "brand name or unknown",
-                "color": "main color",
-                "features": ["feature1", "feature2"],
-                "condition": "new/used/like new",
-                "description": "brief 1-sentence summary"
-            }}
-            """
-            
-            try:
-                structured = self.groq_client.chat.completions.create(
-                    model=self.text_model,
-                    messages=[{"role": "user", "content": structured_prompt}],
-                    temperature=0.2,
-                    max_tokens=300
-                )                
-                json_str = structured.choices[0].message.content
-                json_str = json_str.replace('```json', '').replace('```', '').strip()
-                analysis_json = json.loads(json_str)                
-                return json.dumps({
-                    "natural_description": response_text,
-                    "structured": analysis_json
-                })
-                
-            except:
-                # If JSON parsing fails, just return the natural description
-                return json.dumps({
-                    "natural_description": response_text,
-                    "structured": {
-                        "product_type": "Unknown",
-                        "brand": "Unknown", 
-                        "color": "Unknown",
-                        "features": [],
-                        "condition": "Unknown",
-                        "description": response_text[:200]
-                    }
-                })
-            
-        except Exception as e:
-            print(f"Image processing error: {e}")
-            return json.dumps({
-                "error": str(e),
-                "natural_description": "I couldn't process this image. Please describe the product you're looking for.",
-                "structured": {
-                    "product_type": "Unknown",
-                    "brand": "Unknown",
-                    "color": "Unknown",
-                    "features": [],
-                    "condition": "Unknown",
-                    "description": "Unable to analyze image"
-                }
-            })
-    
-    async def process_audio_with_groq_ecosystem(self, audio_data: Union[str, bytes, Path], 
-                                                 language: str = "en") -> str:
-        """Transcribe audio using external service, then enhance with Groq"""
-        
-        # Try available STT services
-        if self.deepgram_api_key:
-            transcript = await self._transcribe_with_deepgram(audio_data, language)
-       
-        else:
-            return "Voice transcription requires Deepgram, AssemblyAI, or HuggingFace API key."
-        
-        if transcript and transcript != "":
-            # Enhance with Groq
-            return await self._enhance_transcript_with_groq(transcript)
-        return ""
-    
-    async def _enhance_transcript_with_groq(self, transcript: str) -> str:
-        """Use Groq to clean up transcript"""
-        if not transcript:
-            return ""
-        
-        try:
-            enhancement = self.groq_client.chat.completions.create(
-                model=self.text_model,  # Using text model
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """Clean up speech-to-text transcript for e-commerce.
-                        Fix grammar, capitalize properly, correct product terms, remove filler words.
-                        Return ONLY cleaned transcript, nothing else."""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Raw transcript: {transcript}"
-                    }
-                ],
-                temperature=0.2,
-                max_tokens=300
-            )
-            
-            return enhancement.choices[0].message.content.strip()
-            
-        except Exception as e:
-            print(f"Groq enhancement error: {e}")
-            return transcript
-    
-    async def _transcribe_with_deepgram(self, audio_data, language="en") -> str:
-        """Use Deepgram for transcription"""
-        try:
-            if isinstance(audio_data, str) and Path(audio_data).exists():
-                with open(audio_data, 'rb') as f:
-                    audio_bytes = f.read()
-            elif isinstance(audio_data, bytes):
-                audio_bytes = audio_data
-            else:
-                response = requests.get(audio_data, timeout=10)
-                audio_bytes = response.content
-            
-            print(f"Audio size: {len(audio_bytes)} bytes")
-            
-            if len(audio_bytes) < 1000:
-                print("Audio too small - likely empty or invalid")
-                return ""            
-            with open("debug_audio.webm", "wb") as f:
-                f.write(audio_bytes)
-            print("Saved audio to debug_audio.webm for inspection")
-            
-            url = "https://api.deepgram.com/v1/listen"
-            headers = {
-                "Authorization": f"Token {self.deepgram_api_key}",
-            }
-            params = {
-                "model": "nova-2",
-                "language": language,
-            }
-            
-            response = requests.post(
-                url, 
-                headers=headers, 
-                params=params, 
-                data=audio_bytes,
-                # headers={"Content-Type": "audio/webm"}
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                transcript = result['results']['channels'][0]['alternatives'][0]['transcript']
-                print(f"Deepgram transcript: '{transcript}'")
-                return transcript
-            else:
-                print(f"Deepgram error {response.status_code}: {response.text}")
-                return ""
-                
-        except Exception as e:
-            print(f"Deepgram error: {e}")
-            return ""
-   
-    async def process_pdf_with_groq(self, pdf_data: Union[str, bytes, Path]) -> Dict:
-        """Process PDF using Groq for analysis - handles any PDF"""
-        try:
-            import PyPDF2
-            
-            # Extract text (PyPDF2 is lightweight and free)
-            if isinstance(pdf_data, str):
-                if Path(pdf_data).exists():
-                    pdf_path = pdf_data
-                else:
-                    response = requests.get(pdf_data, timeout=10)
-                    temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-                    temp_pdf.write(response.content)
-                    temp_pdf.close()
-                    pdf_path = temp_pdf.name
-            else:
-                temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-                temp_pdf.write(pdf_data)
-                temp_pdf.close()
-                pdf_path = temp_pdf.name
-            
-            # Extract text
-            text_content = []
-            with open(pdf_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                for page in pdf_reader.pages[:10]:  # First 10 pages
-                    text = page.extract_text()
-                    if text.strip():
-                        text_content.append(text)
-            
-            full_text = "\n\n".join(text_content)
-            
-            # Use Groq for intelligent analysis - handles ANY PDF
-            analysis = self.groq_client.chat.completions.create(
-                model=self.text_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """You are a helpful document analyzer. Analyze this PDF and provide a friendly response.
-
-    FIRST, determine what type of document this is:
-    - Product-related (invoice, warranty, manual, receipt, product specs) → Help with e-commerce
-    - Resume/CV → Offer polite assistance
-    - Personal document → Be respectful and helpful
-    - Other document → Provide general assistance
-
-    Based on the document type, respond appropriately:
-
-    IF PRODUCT-RELATED:
-    Extract: product_specs, pricing, warranty_terms, return_policy, dates
-
-    IF NOT PRODUCT-RELATED (resume, personal, etc.):
-    Provide a friendly message like:
-    "I see you uploaded a [type of document]. While I'm specialized in helping with product-related documents, I can still help you find products or answer questions about our electronics store. Is there anything specific I can help you with today?"
-
-    Return as JSON with:
-    {
-        "document_type": "product/resume/personal/other",
-        "is_product_related": true/false,
-        "analysis": "friendly response for the user",
-        "extracted_data": {} // Only if product-related
-    }"""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Document text (first 6000 chars):\n{full_text[:6000]}"
-                    }
-                ],
-                temperature=0.3,
-                max_tokens=1000
-            )
-            
-            # Clean up
-            if 'temp_pdf' in locals() and Path(pdf_path).exists():
-                os.unlink(pdf_path)
-            
-            # Parse the response
-            try:
-                result = json.loads(analysis.choices[0].message.content)
-                return {
-                    "analysis": result.get("analysis", "I've analyzed your document."),
-                    "document_type": result.get("document_type", "other"),
-                    "is_product_related": result.get("is_product_related", False),
-                    "extracted_data": result.get("extracted_data", {}),
-                    "text_preview": full_text[:500],
-                    "page_count": len(pdf_reader.pages) if 'pdf_reader' in locals() else 0
-                }
-            except:
-                # Fallback if JSON parsing fails
-                return {
-                    "analysis": analysis.choices[0].message.content,
-                    "document_type": "other",
-                    "is_product_related": False,
-                    "extracted_data": {},
-                    "text_preview": full_text[:500],
-                    "page_count": len(pdf_reader.pages) if 'pdf_reader' in locals() else 0
-                }
-                
-        except Exception as e:
-            print(f"PDF processing error: {e}")
-            return {
-                "error": str(e),
-                "analysis": "I had trouble reading that PDF. Please make sure it's a valid document.",
-                "document_type": "error",
-                "is_product_related": False
-            }
-
 
 class EcommerceBot:
     def __init__(self):
@@ -349,16 +32,52 @@ class EcommerceBot:
             os.getenv("ECOM_SUPABASE_URL"),
             os.getenv("ECOM_SUPABASE_KEY")
         )
+        self.logger = setup_logger("ecommerce_bot")
         
         # Initialize multimodal processor
         self.multimodal = GroqOnlyMultimodalProcessor(self.groq_client)
-        
+        self.query_pipeline = QueryRewritingPipeline(
+            llm_client=self.groq_client,
+            category_map={
+                "laptops": ["laptop", "notebook", "macbook", "gaming laptop", "ultrabook"],
+                "phones": ["phone", "smartphone", "iphone", "android", "pixel", "galaxy"],
+                "audio": ["headphones", "earbuds", "speakers", "airpods", "headset"],
+                "tablets": ["tablet", "ipad", "galaxy tab", "surface"],
+                "accessories": ["case", "charger", "cable", "adapter", "stand"]
+            }
+        )
         # Load static documentation
         self.documents = self.load_document_context()
+        
+        # Initialize vector components
+        self.qdrant_client = None
+        self.embedder = None
+        self._init_vector_components()
+        
+        # Chunk policies on startup
+        self.chunk_policies()
+        self.intent_classifier = IntentClassifier(llm_client=self.groq_client)
+
         
         print(f" {self.name} initialized with Groq multimodal support")
         print(f"   Vision Model: {self.multimodal.vision_model}")
         print(f"   Text Model: {self.multimodal.text_model}")
+    
+    def _init_vector_components(self):
+        """Initialize Qdrant and embedder"""
+        try:
+            from qdrant_client import QdrantClient
+            from sentence_transformers import SentenceTransformer
+            
+            self.qdrant_client = QdrantClient(
+                url=os.getenv("QDRANT_CLOUD_URL"),
+                api_key=os.getenv("QDRANT_CLOUD_API_KEY"),
+                timeout=60,
+            )
+            self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+            print("   Vector components initialized")
+        except Exception as e:
+            print(f"   Vector components error: {e}")
     
     def load_document_context(self) -> Dict[str, str]:
         """Load static documentation"""
@@ -370,95 +89,389 @@ class EcommerceBot:
             "warranty": "1-year manufacturer warranty, extended available",
             "faqs": "Common questions about tracking, cancellation, price matching"
         }
-    async def search_similar_products_qdrant(self, search_query: str, limit: int = 5) -> List[Dict]:
-        """Search Qdrant using text query - works with any qdrant-client version"""
+    
+    def chunk_policies(self):
+        """Chunk policy documents into vector store"""
+        if not self.qdrant_client or not self.embedder:
+            print("Vector components not available, skipping policy chunking")
+            return
+        
+        print("Chunking policy documents...")
+        
+        policies = {
+            "shipping": {
+                "text": "Free shipping on orders over $50. Standard shipping takes 3-5 business days. Express shipping costs $9.99 and delivers in 1-2 business days. International shipping available to select countries.",
+                "category": "shipping"
+            },
+            "returns": {
+                "text": "30-day return policy. Free returns for defective items. 15% restocking fee for non-defective returns. Products must be in original condition. Refunds processed in 5-7 business days.",
+                "category": "returns"
+            },
+            "warranty": {
+                "text": "1-year manufacturer warranty on all electronics. Extended warranty available for purchase. Warranty covers manufacturing defects only. Does not cover accidental damage or normal wear.",
+                "category": "warranty"
+            },
+            "payment": {
+                "text": "We accept credit cards (Visa, Mastercard, American Express), PayPal, Apple Pay, Google Pay, and Klarna. All payments are securely processed.",
+                "category": "payment"
+            }
+        }
+        
         try:
-            from qdrant_client import QdrantClient
-            from sentence_transformers import SentenceTransformer
+            points = []
+            for policy_name, policy_data in policies.items():
+                sentences = policy_data["text"].split(". ")
+                for i, sentence in enumerate(sentences):
+                    if len(sentence) > 20:
+                        embedding = self.embedder.encode(sentence).tolist()
+                        from qdrant_client.models import PointStruct
+                        point = PointStruct(
+                            id=str(uuid.uuid4()),
+                            vector=embedding,
+                            payload={
+                                "policy_name": policy_name,
+                                "category": policy_data["category"],
+                                "text": sentence,
+                                "chunk_index": i,
+                                "type": "policy_chunk"
+                            }
+                        )
+                        points.append(point)
             
-            # Connect to Qdrant Cloud
-            qdrant_client = QdrantClient(
-                url=os.getenv("QDRANT_CLOUD_URL"),
-                api_key=os.getenv("QDRANT_CLOUD_API_KEY"),
-                timeout=60,
+            if points:
+                self.qdrant_client.upsert(
+                    collection_name="ecommerce_chunks",
+                    points=points
+                )
+                print(f"   Indexed {len(points)} policy chunks")
+        except Exception as e:
+            print(f"   Policy chunking error: {e}")
+    
+    async def get_product_by_id(self, product_id: int) -> Optional[Dict]:
+        """Helper to get single product by ID"""
+        try:
+            result = self.supabase.table("products")\
+                .select("product_id, name, description, price, stock, avg_rating")\
+                .eq("product_id", product_id)\
+                .single()\
+                .execute()
+            return result.data if result.data else None
+        except:
+            return None
+    
+    async def semantic_search_qdrant(self, search_query: str, limit: int = 5) -> List[Dict]:
+        """Improved semantic search using vector embeddings"""
+        if not self.qdrant_client or not self.embedder:
+            return await self.get_products(search=search_query, limit=limit)
+        
+        try:
+            query_vector = self.embedder.encode(search_query).tolist()
+            
+            results = self.qdrant_client.search(
+                collection_name="ecommerce_products",
+                query_vector=query_vector,
+                limit=limit,
+                score_threshold=0.4
             )
-            
-            # Create embedding from search query
-            embedder = SentenceTransformer('all-MiniLM-L6-v2')
-            query_vector = embedder.encode(search_query).tolist()
-            
-            # Try different method names (universal approach)
-            results = None
-            
-            # Method 1: Modern versions (v1.7+)
-            if hasattr(qdrant_client, 'search'):
-                results = qdrant_client.search(
-                    collection_name="ecommerce",
-                    query_vector=query_vector,
-                    limit=limit
-                )
-            # Method 2: Older versions (v1.0 - v1.6)
-            elif hasattr(qdrant_client, 'search_collection'):
-                results = qdrant_client.search_collection(
-                    collection_name="ecommerce",
-                    query_vector=query_vector,
-                    limit=limit
-                )
-            # Method 3: Points API
-            elif hasattr(qdrant_client, 'query_points'):
-                response = qdrant_client.query_points(
-                    collection_name="ecommerce",
-                    query=query_vector,
-                    limit=limit
-                )
-                results = response.points
-            else:
-                print("No search method found in qdrant client")
-                return []
             
             if not results:
                 return []
             
-            # Get full product details from Supabase
             product_ids = [result.id for result in results]
-            if product_ids:
-                products = self.supabase.table("products")\
-                    .select("product_id, name, description, price, stock, avg_rating")\
-                    .in_("product_id", product_ids)\
-                    .execute()
-                
-                # Combine with scores
-                for result in results:
-                    for product in products.data:
-                        if product['product_id'] == result.id:
-                            product['similarity_score'] = result.score
-                            break
-                
-                return products.data
-            return []
+            products = self.supabase.table("products")\
+                .select("product_id, name, description, price, stock, avg_rating")\
+                .in_("product_id", product_ids)\
+                .execute()
+            
+            product_dict = {p['product_id']: p for p in products.data}
+            enriched_results = []
+            
+            for result in results:
+                if result.id in product_dict:
+                    product = product_dict[result.id].copy()
+                    product['similarity_score'] = result.score
+                    product['search_type'] = 'semantic'
+                    enriched_results.append(product)
+            
+            return enriched_results
             
         except Exception as e:
-            print(f"Qdrant search error: {e}")
+            print(f"Semantic search error: {e}")
             return []
+    
+    async def hybrid_search(self, query: str, limit: int = 5) -> List[Dict]:
+        """Hybrid search combining vector and keyword results"""
+        if not self.qdrant_client or not self.embedder:
+            return await self.get_products(search=query, limit=limit)
+        
+        try:
+            # Vector search
+            query_vector = self.embedder.encode(query).tolist()
+            vector_results = self.qdrant_client.search(
+                collection_name="ecommerce_products",
+                query_vector=query_vector,
+                limit=limit * 2
+            )
+            
+            # Keyword search
+            keyword_results = await self.get_products(search=query, limit=limit * 2)
+            
+            # Combine and deduplicate
+            combined = {}
+            
+            for r in vector_results:
+                product = await self.get_product_by_id(r.id)
+                if product:
+                    combined[r.id] = {
+                        **product,
+                        "vector_score": r.score,
+                        "keyword_score": 0,
+                        "search_type": "hybrid"
+                    }
+            
+            for p in keyword_results:
+                if p['id'] in combined:
+                    combined[p['id']]["keyword_score"] = 0.7
+                    combined[p['id']]["final_score"] = combined[p['id']]["vector_score"] + 0.7
+                else:
+                    combined[p['id']] = {
+                        **p,
+                        "vector_score": 0,
+                        "keyword_score": 0.5,
+                        "final_score": 0.5
+                    }
+            
+            for pid in combined:
+                if "final_score" not in combined[pid]:
+                    combined[pid]["final_score"] = combined[pid]["vector_score"] + combined[pid]["keyword_score"]
+            
+            sorted_results = sorted(combined.values(), key=lambda x: x.get("final_score", 0), reverse=True)
+            return sorted_results[:limit]
+            
+        except Exception as e:
+            print(f"Hybrid search error: {e}")
+            return await self.get_products(search=query, limit=limit)
+    
+    async def rerank_results(self, query: str, results: List[Dict]) -> List[Dict]:
+        """Re-rank search results using Groq"""
+        if len(results) <= 3:
+            return results
+        
+        try:
+            product_list = []
+            for i, p in enumerate(results[:10]):
+                product_list.append(f"{i+1}. {p['name']} - {p.get('description', '')[:100]}")
+            
+            rerank_prompt = f"""Query: "{query}"
+
+Products:
+{chr(10).join(product_list)}
+
+Return ONLY the product numbers in order of relevance (most relevant first), separated by commas.
+Example: "3,1,5,2,4"
+
+Your ranking:"""
+            
+            completion = self.groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": rerank_prompt}],
+                temperature=0,
+                max_tokens=50
+            )
+            
+            ranking_text = completion.choices[0].message.content.strip()
+            ranking = [int(x.strip()) - 1 for x in ranking_text.split(',') if x.strip().isdigit()]
+            
+            reranked = []
+            for idx in ranking:
+                if idx < len(results):
+                    reranked.append(results[idx])
+            
+            for i, p in enumerate(results):
+                if p not in reranked:
+                    reranked.append(p)
+            
+            return reranked
+            
+        except Exception as e:
+            print(f"Reranking error: {e}")
+            return results
+    
+    async def get_relevant_policies(self, query: str) -> str:
+        """Retrieve relevant policy chunks"""
+        if not self.qdrant_client or not self.embedder:
+            return ""
+        
+        try:
+            query_vector = self.embedder.encode(query).tolist()
+            
+            results = self.qdrant_client.search(
+                collection_name="ecommerce_chunks",
+                query_vector=query_vector,
+                limit=2,
+                score_threshold=0.4
+            )
+            
+            if results:
+                policies = [r.payload.get('text', '') for r in results]
+                return " ".join(policies)
+            
+        except Exception as e:
+            print(f"Policy retrieval error: {e}")
+        
+        return ""
+    async def rewrite_query(self, query: str, history: List[Dict] = None) -> str:
+        """
+        Enhanced query rewriting using the advanced pipeline.
+        This replaces the old simple rewrite_query method.
+        """
+        try:
+            result = await self.query_pipeline.rewrite(
+                query=query,
+                conversation_history=history,
+                domain="ecommerce"
+            )
+            return result.rewritten
+        except Exception as e:
+            print(f"Advanced query rewrite error: {e}")
+            # Fallback to original logic
+            return await self._legacy_rewrite_query(query, history)
+    
+    # FIX: This method needs to be properly indented (inside the class)
+    async def _legacy_rewrite_query(self, query: str, history: List[Dict] = None) -> str:
+        """Fallback to original rewrite logic if pipeline fails"""
+        if not history or len(history) < 2:
+            return query
+        
+        try:
+            recent_history = history[-4:] if len(history) > 4 else history
+            history_text = []
+            for msg in recent_history:
+                role = "User" if msg["role"] == "user" else "Assistant"
+                history_text.append(f"{role}: {msg['content']}")
+            
+            rewrite_prompt = f"""Conversation history:
+{chr(10).join(history_text)}
+
+Current query: "{query}"
+
+If this query has pronouns (it, that, those, they, these, the second one) or is ambiguous, rewrite it to be self-contained.
+If the query is clear, return it unchanged.
+
+Rewritten query:"""
+            
+            completion = self.groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": rewrite_prompt}],
+                temperature=0.2,
+                max_tokens=100
+            )
+            
+            rewritten = completion.choices[0].message.content.strip()
+            return rewritten if rewritten else query
+            
+        except Exception as e:
+            print(f"Legacy query rewrite error: {e}")
+            return query
+    async def retrieve_context(self, message: str, user_id: Optional[str] = None) -> tuple[str, List[str]]:
+        """Retrieve relevant context using vector embeddings"""
+        context_parts = []
+        sources = []
+        
+        # Vector product search
+        if self.qdrant_client and self.embedder:
+            try:
+                query_vector = self.embedder.encode(message).tolist()
+                results = self.qdrant_client.search(
+                    collection_name="ecommerce_products",
+                    query_vector=query_vector,
+                    limit=3,
+                    score_threshold=0.5
+                )
+                
+                if results:
+                    products = []
+                    for result in results:
+                        products.append({
+                            "name": result.payload.get('name'),
+                            "price": result.payload.get('price'),
+                            "score": result.score
+                        })
+                    context_parts.append(f"RELEVANT PRODUCTS: {json.dumps(products, indent=2)}")
+                    sources.append("vector_products")
+            except Exception as e:
+                print(f"Vector search error: {e}")
+        
+        # Fallback to keyword search
+        if not sources:
+            words = message.split()
+            if words:
+                search_term = words[-1] if len(words) > 0 else None
+                if search_term and len(search_term) > 2:
+                    products = await self.get_products(search=search_term, limit=3)
+                    if products:
+                        context_parts.append(f"PRODUCTS: {json.dumps(products, indent=2)}")
+                        sources.append("keyword_products")
+        
+        # Add company info
+        context_parts.append(f"COMPANY INFO: {self.documents['company_info']}")
+        sources.append("company_info")
+        
+        return "\n\n---\n\n".join(context_parts), sources
+    
+    async def generate_response(self, message: str, context: str, history: List[Dict] = None) -> str:
+        """Generate response using Groq"""
+        system_prompt = f"""You are ShopAssist, a helpful e-commerce assistant.
+CRITICAL RULES
+1. ONLY mention products that are listed in the CONTEXT below
+2. If a product is not in CONTEXT, DO NOT invent it
+3. If no relevant products exist, say "I couldn't find matching products"
+4. Do NOT make up prices, names, or specifications
+5. Use EXACT product names from CONTEXT
+CONTEXT: {context}
+
+Rules:
+- Be helpful and concise (2-3 sentences)
+- Suggest products when relevant
+- Be friendly and use emojis occasionally
+- Never make up information
+
+Response:"""
+        
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history[-3:])
+        messages.append({"role": "user", "content": message})
+        
+        try:
+            completion = self.groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=messages,
+                temperature=0.7,
+                max_tokens=500
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            print(f"Groq error: {e}")
+            return "I'm having trouble right now. Please try again."
+    
+    async def search_similar_products_qdrant(self, search_query: str, limit: int = 5) -> List[Dict]:
+        """Legacy method - uses hybrid search now"""
+        return await self.hybrid_search(search_query, limit)
     
     async def chat_with_image(self, message: str, image_data: Union[str, bytes, Path],
                          user_id: Optional[str] = None,
                          conversation_history: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """Chat with image using Qdrant vector search"""
         try:
-            # Step 1: Analyze image with Groq
             image_analysis = await self.multimodal.process_image_with_groq(image_data, message)
             analysis_json = json.loads(image_analysis)
             
-            # Step 2: Create search query from analysis
             structured = analysis_json.get('structured', {})
-            
             search_query = f"{structured.get('product_type', '')} {structured.get('brand', '')} {' '.join(structured.get('features', []))}"
             
-            # Step 3: Search in Qdrant
-            similar_products = await self.search_similar_products_qdrant(search_query, limit=5)
+            similar_products = await self.hybrid_search(search_query, limit=5)
             
-            # Step 4: Generate response
             if similar_products:
                 response = " I found these products similar to your image:\n\n"
                 for i, product in enumerate(similar_products[:3], 1):
@@ -507,18 +520,7 @@ class EcommerceBot:
                     "timestamp": datetime.now().isoformat()
                 }
             
-            context, sources = await self.retrieve_context(transcribed_text, user_id)
-            response = await self.generate_response(transcribed_text, context, conversation_history)
-            
-            return {
-                "response": response,
-                "transcribed_text": transcribed_text,
-                "status": "success",
-                "bot_name": self.name,
-                "bot_id": self.bot_id,
-                "context_used": sources,
-                "timestamp": datetime.now().isoformat()
-            }
+            return await self.chat(transcribed_text, user_id, conversation_history)
             
         except Exception as e:
             print(f"Voice chat error: {e}")
@@ -546,10 +548,8 @@ class EcommerceBot:
                     "timestamp": datetime.now().isoformat()
                 }
             
-            # Use the analysis directly from the PDF processor
             response_text = pdf_content.get('analysis', "I've reviewed your document.")
             
-            # If it's not product-related, add a helpful note
             if not pdf_content.get('is_product_related', False):
                 response_text += "\n\nIs there anything specific about our electronics products I can help you with? 🛒"
             
@@ -574,6 +574,7 @@ class EcommerceBot:
                 "bot_id": self.bot_id,
                 "timestamp": datetime.now().isoformat()
             }
+    
     async def get_categories(self) -> List[Dict]:
         """Get all product categories"""
         try:
@@ -611,71 +612,143 @@ class EcommerceBot:
             print(f"Products error: {e}")
             return []
     
-    async def retrieve_context(self, message: str, user_id: Optional[str] = None) -> tuple[str, List[str]]:
-        """Retrieve relevant context"""
-        context_parts = [self.documents["company_info"]]
-        sources = ["company_info"]
-        
-        # Simple product search
-        words = message.split()
-        if words:
-            search_term = words[-1] if len(words) > 0 else None
-            if search_term and len(search_term) > 2:
-                products = await self.get_products(search=search_term, limit=3)
-                if products:
-                    context_parts.append(f"PRODUCTS: {json.dumps(products, indent=2)}")
-                    sources.append("products")
-        
-        return "\n\n---\n\n".join(context_parts), sources
-    
-    async def generate_response(self, message: str, context: str, history: List[Dict] = None) -> str:
-        """Generate response using Groq"""
-        system_prompt = f"""You are ShopAssist, a helpful e-commerce assistant.
-
-CONTEXT: {context}
-
-Rules:
-- Be helpful and concise (2-3 sentences)
-- Suggest products when relevant
-- Be friendly and use emojis occasionally
-- Never make up information
-
-Response:"""
-        
-        messages = [{"role": "system", "content": system_prompt}]
-        if history:
-            messages.extend(history[-3:])
-        messages.append({"role": "user", "content": message})
-        
-        try:
-            completion = self.groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=messages,
-                temperature=0.7,
-                max_tokens=500
-            )
-            return completion.choices[0].message.content
-        except Exception as e:
-            print(f"Groq error: {e}")
-            return "I'm having trouble right now. Please try again."
-    
     async def chat(self, message: str, user_id: Optional[str] = None, 
                    conversation_history: Optional[List[Dict]] = None) -> Dict[str, Any]:
-        """Standard text chat"""
-        context, sources = await self.retrieve_context(message, user_id)
-        response = await self.generate_response(message, context, conversation_history)
+        """Chat with intent classification and conditional rewriting"""
+        
+        self.logger.info(f"Processing message from user: {user_id or 'anonymous'}")
+        self.logger.debug(f"Message content: {message[:200]}")        
+        intent, method = await self.intent_classifier.classify(message)
+        self.logger.info(f"Intent classified: {intent.value} (method={method})")        
+        direct_response = self.intent_classifier.get_direct_response(intent)
+        if direct_response:
+            self.logger.info(f"Returning direct response for intent: {intent.value}")
+            return {
+                "response": direct_response,
+                "status": "success",
+                "bot_name": self.name,
+                "bot_id": self.bot_id,
+                "original_query": message,
+                "intent": intent.value,
+                "classification_method": method,
+                "rag_used": False,
+                "timestamp": datetime.now().isoformat()
+                
+            }
+        
+        # Step 3: Determine if query needs rewriting
+        should_rewrite = self.intent_classifier.should_rewrite_query(intent)
+        self.logger.info(f"Query rewriting required: {should_rewrite} for intent {intent.value}")
+        
+        # Step 4: Process based on intent
+        if should_rewrite:
+            self.logger.debug("Applying query rewriting pipeline")
+            rewritten_result = await self.query_pipeline.rewrite(
+                query=message,
+                conversation_history=conversation_history,
+                domain="ecommerce"
+            )
+            search_query = rewritten_result.rewritten
+            sub_queries = rewritten_result.sub_queries
+            constraints = rewritten_result.constraints
+            techniques = rewritten_result.technique_used
+            
+            self.logger.info(f"Query rewritten: '{search_query}' (techniques: {techniques})")
+            if constraints:
+                self.logger.debug(f"Applied constraints: {constraints}")
+        else:
+            self.logger.debug(f"Skipping rewrite for low-intent query: {intent.value}")
+            search_query = message
+            sub_queries = [message]
+            constraints = {}
+            techniques = "none"
+        
+        # Step 5: Search based on intent type
+        all_products = []
+        if intent == IntentType.POLICY_QUESTION:
+            self.logger.info(f"Retrieving policy information for query: {search_query}")
+            policy_context = await self.get_relevant_policies(search_query)
+            all_products = []
+        else:
+            self.logger.debug(f"Executing product search with {len(sub_queries)} sub-queries")
+            for sub_query in sub_queries[:3]:
+                products = await self.hybrid_search(sub_query, limit=3)
+                all_products.extend(products)
+                self.logger.debug(f"Sub-query '{sub_query}' returned {len(products)} products")
+        
+        # Step 6: Deduplicate and apply constraints
+        unique_products = {}
+        for p in all_products:
+            pid = p.get('id') or p.get('product_id')
+            if pid and pid not in unique_products:
+                unique_products[pid] = p
+        
+        products_list = list(unique_products.values())
+        self.logger.info(f"Retrieved {len(products_list)} unique products")
+        
+        # Apply constraints
+        if constraints:
+            original_count = len(products_list)
+            if 'price_max' in constraints:
+                products_list = [p for p in products_list if p.get('price', 0) <= constraints['price_max']]
+            if 'min_rating' in constraints:
+                products_list = [p for p in products_list if p.get('rating', 0) >= constraints['min_rating']]
+            if original_count != len(products_list):
+                self.logger.info(f"Filtered products: {original_count} → {len(products_list)} (constraints applied)")
+        
+        # Step 7: Rerank if products found
+        if products_list:
+            reranked_products = await self.rerank_results(search_query, products_list)
+            self.logger.info(f"Reranked {len(reranked_products)} products")
+        else:
+            reranked_products = []
+            self.logger.warning(f"No products found for query: {search_query}")
+        
+        # Step 8: Build context and response
+        context_parts = []
+        
+        if reranked_products:
+            context_parts.append(f"TOP PRODUCTS: {json.dumps(reranked_products[:3], indent=2)}")
+        
+        if intent == IntentType.POLICY_QUESTION:
+            policy_context = await self.get_relevant_policies(search_query)
+            if policy_context:
+                context_parts.append(f"RELEVANT POLICIES: {policy_context}")
+                self.logger.debug("Policy context added to response")
+        
+        context_parts.append(f"COMPANY INFO: {self.documents['company_info']}")
+        context = "\n\n---\n\n".join(context_parts)
+        
+        response = await self.generate_response(search_query, context, conversation_history)
+        self.logger.info(f"Response generated successfully ({len(response)} chars)")
+        
         return {
             "response": response,
             "status": "success",
             "bot_name": self.name,
             "bot_id": self.bot_id,
-            "context_used": sources,
-            "timestamp": datetime.now().isoformat()
+            "original_query": message,
+            "intent": intent.value,
+            "classification_method": method,
+            "rewritten_query": search_query if should_rewrite else "not rewritten",
+            "techniques_used": techniques,
+            "rag_used": should_rewrite,
+            "products_found": len(reranked_products),
+            "timestamp": datetime.now().isoformat(),
+            "products": [  
+        {
+            "id": p.get("id") or p.get("product_id"),
+            "name": p.get("name"),
+            "price": p.get("price"),
+            "rating": p.get("rating") or p.get("avg_rating")
         }
-    
+        for p in reranked_products[:5]
+    ],
+    "timestamp": datetime.now().isoformat()
+        }
     async def search_products_api(self, query: str) -> List[Dict]:
-        """Direct product search API endpoint"""
-        return await self.get_products(search=query, limit=10)
+        """Direct product search API endpoint using hybrid search"""
+        return await self.hybrid_search(query, limit=10)
     
     async def get_product_detail(self, product_id: int) -> Dict:
         """Get detailed product information"""
