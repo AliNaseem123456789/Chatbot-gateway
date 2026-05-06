@@ -160,19 +160,37 @@ class EcommerceBot:
             return None
     
     async def semantic_search_qdrant(self, search_query: str, limit: int = 5) -> List[Dict]:
-        """Improved semantic search using vector embeddings"""
+        """Improved semantic search using vector embeddings - works with v0.x and v1.x"""
         if not self.qdrant_client or not self.embedder:
             return await self.get_products(search=search_query, limit=limit)
         
         try:
             query_vector = self.embedder.encode(search_query).tolist()
             
-            results = self.qdrant_client.search(
-                collection_name="ecommerce_products",
-                query_vector=query_vector,
-                limit=limit,
-                score_threshold=0.4
-            )
+            results = None
+            
+            # Try v1.x API (query_points)
+            if hasattr(self.qdrant_client, 'query_points'):
+                response = self.qdrant_client.query_points(
+                    collection_name="ecommerce_products",
+                    query=query_vector,
+                    limit=limit,
+                    score_threshold=0.4
+                )
+                results = response.points if hasattr(response, 'points') else []
+            
+            # Try v0.x API (search)
+            elif hasattr(self.qdrant_client, 'search'):
+                results = self.qdrant_client.search(
+                    collection_name="ecommerce_products",
+                    query_vector=query_vector,
+                    limit=limit,
+                    score_threshold=0.4
+                )
+            
+            else:
+                print("No compatible search method found")
+                return []
             
             if not results:
                 return []
