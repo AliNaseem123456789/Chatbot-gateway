@@ -73,7 +73,9 @@ class EcommerceBot:
                 url=os.getenv("QDRANT_CLOUD_URL"),
                 api_key=os.getenv("QDRANT_CLOUD_API_KEY"),
                 timeout=60,
+                check_compatibility=False
             )
+            
             self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
             print("   Vector components initialized")
         except Exception as e:
@@ -160,51 +162,20 @@ class EcommerceBot:
             return None
     
     async def semantic_search_qdrant(self, search_query: str, limit: int = 5) -> List[Dict]:
-        """Search Qdrant using text query - works with any qdrant-client version"""
+        """Improved semantic search using vector embeddings"""
+        if not self.qdrant_client or not self.embedder:
+            return await self.get_products(search=search_query, limit=limit)
+        
         try:
-            from qdrant_client import QdrantClient
-            from sentence_transformers import SentenceTransformer
-
-            # Connect to Qdrant Cloud
-            qdrant_client = QdrantClient(
-                url=os.getenv("QDRANT_CLOUD_URL"),
-                api_key=os.getenv("QDRANT_CLOUD_API_KEY"),
-                timeout=60,
-            )
-
-            # Create embedding from search query
-            embedder = SentenceTransformer('all-MiniLM-L6-v2')
-            query_vector = embedder.encode(search_query).tolist()
-
-            # Try different method names (universal approach)
-            results = None
+            query_vector = self.embedder.encode(search_query).tolist()
             
-            # Method 1: Modern versions (v1.7+)
-            if hasattr(qdrant_client, 'search'):
-                results = qdrant_client.search(
-                    collection_name="ecommerce",
-                    query_vector=query_vector,
-                    limit=limit
-                )
-            # Method 2: Older versions (v1.0 - v1.6)
-            elif hasattr(qdrant_client, 'search_collection'):
-                results = qdrant_client.search_collection(
-                    collection_name="ecommerce",
-                    query_vector=query_vector,
-                    limit=limit
-                )
-            # Method 3: Newest versions (v1.10+)
-            elif hasattr(qdrant_client, 'query_points'):
-                response = qdrant_client.query_points(
-                    collection_name="ecommerce",
-                    query=query_vector,
-                    limit=limit
-                )
-                results = response.points
-            else:
-                print("No search method found in qdrant client")
-                return []
-
+            results = self.qdrant_client.search(
+                collection_name="ecommerce_products",
+                query_vector=query_vector,
+                limit=limit,
+                score_threshold=0.4
+            )
+            
             if not results:
                 return []
             
