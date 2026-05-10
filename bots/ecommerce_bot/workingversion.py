@@ -69,13 +69,13 @@ class EcommerceBot:
         print(f"   Text Model: {self.multimodal.text_model}")
     
     def _init_vector_components(self):
-        """Initialize Qdrant and embedder - Version compatible"""
+        """Initialize Qdrant and embedder"""
         try:
             from qdrant_client import QdrantClient
             from sentence_transformers import SentenceTransformer
             import qdrant_client
             version = getattr(qdrant_client, "__version__", "unknown")
-            print(f"Qdrant client version: {version}")
+            print(f"📦 Qdrant client version: {version}")
             
             self.qdrant_client = QdrantClient(
                 url=os.getenv("QDRANT_CLOUD_URL"),
@@ -84,17 +84,10 @@ class EcommerceBot:
                 check_compatibility=False
             )
             
-            # Test connection and get available methods
-            self._qdrant_has_query_points = hasattr(self.qdrant_client, 'query_points')
-            self._qdrant_has_search = hasattr(self.qdrant_client, 'search')
-            print(f"   Qdrant API: query_points={self._qdrant_has_query_points}, search={self._qdrant_has_search}")
-            
             self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
             print("   Vector components initialized")
         except Exception as e:
             print(f"   Vector components error: {e}")
-            self.qdrant_client = None
-            self.embedder = None
     
     def load_document_context(self) -> Dict[str, str]:
         """Load static documentation"""
@@ -108,7 +101,7 @@ class EcommerceBot:
         }
     
     def chunk_policies(self):
-        """Chunk policy documents into vector store - Version compatible"""
+        """Chunk policy documents into vector store"""
         if not self.qdrant_client or not self.embedder:
             print("Vector components not available, skipping policy chunking")
             return
@@ -135,14 +128,13 @@ class EcommerceBot:
         }
         
         try:
-            from qdrant_client.models import PointStruct
-            
             points = []
             for policy_name, policy_data in policies.items():
                 sentences = policy_data["text"].split(". ")
                 for i, sentence in enumerate(sentences):
                     if len(sentence) > 20:
                         embedding = self.embedder.encode(sentence).tolist()
+                        from qdrant_client.models import PointStruct
                         point = PointStruct(
                             id=str(uuid.uuid4()),
                             vector=embedding,
@@ -157,14 +149,11 @@ class EcommerceBot:
                         points.append(point)
             
             if points:
-                try:
-                    self.qdrant_client.upsert(
-                        collection_name="ecommerce_chunks",
-                        points=points
-                    )
-                    print(f"   Indexed {len(points)} policy chunks")
-                except Exception as upsert_err:
-                    print(f"   Upsert failed: {upsert_err}")
+                self.qdrant_client.upsert(
+                    collection_name="ecommerce_chunks",
+                    points=points
+                )
+                print(f"   Indexed {len(points)} policy chunks")
         except Exception as e:
             print(f"   Policy chunking error: {e}")
     
@@ -181,69 +170,64 @@ class EcommerceBot:
             return None
     
     async def semantic_search_qdrant(self, search_query: str, limit: int = 5) -> List[Dict]:
-        """Semantic search using vector embeddings - Version compatible with social bot pattern"""
-        
+        """Improved semantic search using vector embeddings - Version Resilient"""
+        # 1. Safety check for initialization
         if not self.qdrant_client or not self.embedder:
-            print("Qdrant components not initialized, falling back to keyword search")
+            print("⚠️ Qdrant components not initialized, falling back to keyword search")
             return await self.get_products(search=search_query, limit=limit)
         
         try:
+            # 2. Generate embedding
             query_vector = self.embedder.encode(search_query).tolist()
-            results = None
-            collection = "ecommerce_products"
             
-            # Try modern API first (like social bot)
+            # 3. Flexible Search Execution (Fixes the Railway 'attribute' error)
+            results = None
+            client = self.qdrant_client
+            collection = "ecommerce_products" # Ensure this matches your Qdrant Cloud dashboard
+
             try:
-                if hasattr(self.qdrant_client, 'query_points'):
-                    response = self.qdrant_client.query_points(
+                if hasattr(client, 'query_points'): # Modern (v1.10+)
+                    response = client.query_points(
                         collection_name=collection,
                         query=query_vector,
-                        limit=limit
+                        limit=limit,
+                        score_threshold=0.4
                     )
                     results = response.points
-                elif hasattr(self.qdrant_client, 'search'):
-                    results = self.qdrant_client.search(
+                elif hasattr(client, 'search'): # Standard (v1.0+)
+                    results = client.search(
                         collection_name=collection,
                         query_vector=query_vector,
-                        limit=limit
+                        limit=limit,
+                        score_threshold=0.4
                     )
-                else:
-                    print(f"No compatible search method found")
-                    return await self.get_products(search=search_query, limit=limit)
-            except TypeError as te:
-                if "unexpected keyword argument" in str(te):
-                    print(f"Parameter mismatch, trying alternative...")
-                    if hasattr(self.qdrant_client, 'search'):
-                        results = self.qdrant_client.search(
-                            collection_name=collection,
-                            query_vector=query_vector,
-                            limit=limit
-                        )
-                else:
-                    raise
-            
+            except Exception as search_err:
+                print(f" Qdrant search execution failed: {search_err}")
+                return []
+
             if not results:
                 return []
             
-            # Extract IDs
+            # 4. Extract IDs (Handling different result object types)
             product_ids = []
             scores = {}
             for res in results:
+                # Some versions use res.id, some use res.uuid
                 p_id = getattr(res, 'id', None)
                 if p_id:
                     product_ids.append(p_id)
-                    scores[p_id] = getattr(res, 'score', 0.0)
-            
+                    scores[p_id] = getattr(res, 'score', 0)
+
+            # 5. Batch Fetch from Supabase
             if not product_ids:
                 return []
-            
-            # Batch fetch from Supabase
+
             products = self.supabase.table("products")\
                 .select("product_id, name, description, price, stock, avg_rating")\
                 .in_("product_id", product_ids)\
                 .execute()
             
-            # Enrich results
+            # 6. Enrich and Sort (Maintaining the original vector search order)
             product_dict = {str(p['product_id']): p for p in products.data}
             enriched_results = []
             
@@ -258,69 +242,50 @@ class EcommerceBot:
             return enriched_results
             
         except Exception as e:
-            print(f"Critical semantic search error: {e}")
-            return await self.get_products(search=search_query, limit=limit)
-    
+            print(f"🛑 Critical Semantic search error: {e}")
+            return []
     async def hybrid_search(self, query: str, limit: int = 5) -> List[Dict]:
-        """Hybrid search combining vector and keyword results - Version compatible"""
-        
+        """Hybrid search combining vector and keyword results"""
         if not self.qdrant_client or not self.embedder:
             return await self.get_products(search=query, limit=limit)
         
         try:
+            # Vector search
             query_vector = self.embedder.encode(query).tolist()
-            vector_results = []
-            
-            # Vector search with version handling
-            try:
-                if hasattr(self.qdrant_client, 'query_points'):
-                    response = self.qdrant_client.query_points(
-                        collection_name="ecommerce_products",
-                        query=query_vector,
-                        limit=limit * 2
-                    )
-                    vector_results = response.points
-                elif hasattr(self.qdrant_client, 'search'):
-                    vector_results = self.qdrant_client.search(
-                        collection_name="ecommerce_products",
-                        query_vector=query_vector,
-                        limit=limit * 2
-                    )
-            except Exception as search_err:
-                print(f"Vector search failed: {search_err}")
-                vector_results = []
+            vector_results = self.qdrant_client.search(
+                collection_name="ecommerce_products",
+                query_vector=query_vector,
+                limit=limit * 2
+            )
             
             # Keyword search
             keyword_results = await self.get_products(search=query, limit=limit * 2)
             
-            # Combine results
+            # Combine and deduplicate
             combined = {}
             
             for r in vector_results:
-                p_id = getattr(r, 'id', None)
-                if p_id:
-                    product = await self.get_product_by_id(p_id)
-                    if product:
-                        combined[p_id] = {
-                            **product,
-                            "vector_score": getattr(r, 'score', 0),
-                            "keyword_score": 0,
-                            "search_type": "hybrid"
-                        }
+                product = await self.get_product_by_id(r.id)
+                if product:
+                    combined[r.id] = {
+                        **product,
+                        "vector_score": r.score,
+                        "keyword_score": 0,
+                        "search_type": "hybrid"
+                    }
             
             for p in keyword_results:
-                p_id = p.get('id') or p.get('product_id')
-                if p_id in combined:
-                    combined[p_id]["keyword_score"] = 0.7
+                if p['id'] in combined:
+                    combined[p['id']]["keyword_score"] = 0.7
+                    combined[p['id']]["final_score"] = combined[p['id']]["vector_score"] + 0.7
                 else:
-                    combined[p_id] = {
+                    combined[p['id']] = {
                         **p,
                         "vector_score": 0,
                         "keyword_score": 0.5,
                         "final_score": 0.5
                     }
             
-            # Calculate final scores
             for pid in combined:
                 if "final_score" not in combined[pid]:
                     combined[pid]["final_score"] = combined[pid]["vector_score"] + combined[pid]["keyword_score"]
@@ -378,48 +343,28 @@ Your ranking:"""
             return results
     
     async def get_relevant_policies(self, query: str) -> str:
-        """Retrieve relevant policy chunks - Version compatible"""
-        
+        """Retrieve relevant policy chunks"""
         if not self.qdrant_client or not self.embedder:
             return ""
         
         try:
             query_vector = self.embedder.encode(query).tolist()
-            results = []
             
-            # Version-compatible search
-            try:
-                if hasattr(self.qdrant_client, 'query_points'):
-                    response = self.qdrant_client.query_points(
-                        collection_name="ecommerce_chunks",
-                        query=query_vector,
-                        limit=2
-                    )
-                    results = response.points
-                elif hasattr(self.qdrant_client, 'search'):
-                    results = self.qdrant_client.search(
-                        collection_name="ecommerce_chunks",
-                        query_vector=query_vector,
-                        limit=2
-                    )
-            except Exception as search_err:
-                print(f"Policy search failed: {search_err}")
-                return ""
+            results = self.qdrant_client.search(
+                collection_name="ecommerce_chunks",
+                query_vector=query_vector,
+                limit=2,
+                score_threshold=0.4
+            )
             
             if results:
-                policies = []
-                for r in results:
-                    payload = getattr(r, 'payload', {})
-                    text = payload.get('text', '')
-                    if text:
-                        policies.append(text)
+                policies = [r.payload.get('text', '') for r in results]
                 return " ".join(policies)
             
         except Exception as e:
             print(f"Policy retrieval error: {e}")
         
         return ""
-    
     async def rewrite_query(self, query: str, history: List[Dict] = None) -> str:
         """
         Enhanced query rewriting using the advanced pipeline.
@@ -473,9 +418,8 @@ Rewritten query:"""
         except Exception as e:
             print(f"Legacy query rewrite error: {e}")
             return query
-    
     async def retrieve_context(self, message: str, user_id: Optional[str] = None) -> tuple[str, List[str]]:
-        """Retrieve relevant context using vector embeddings - Version compatible"""
+        """Retrieve relevant context using vector embeddings"""
         context_parts = []
         sources = []
         
@@ -483,41 +427,23 @@ Rewritten query:"""
         if self.qdrant_client and self.embedder:
             try:
                 query_vector = self.embedder.encode(message).tolist()
-                results = []
-                
-                # Version-compatible search
-                try:
-                    if hasattr(self.qdrant_client, 'query_points'):
-                        response = self.qdrant_client.query_points(
-                            collection_name="ecommerce_products",
-                            query=query_vector,
-                            limit=3
-                        )
-                        results = response.points
-                    elif hasattr(self.qdrant_client, 'search'):
-                        results = self.qdrant_client.search(
-                            collection_name="ecommerce_products",
-                            query_vector=query_vector,
-                            limit=3
-                        )
-                except Exception as search_err:
-                    print(f"Vector search error: {search_err}")
-                    results = []
+                results = self.qdrant_client.search(
+                    collection_name="ecommerce_products",
+                    query_vector=query_vector,
+                    limit=3,
+                    score_threshold=0.5
+                )
                 
                 if results:
                     products = []
                     for result in results:
-                        payload = getattr(result, 'payload', {})
-                        score = getattr(result, 'score', 0)
                         products.append({
-                            "name": payload.get('name'),
-                            "price": payload.get('price'),
-                            "score": score
+                            "name": result.payload.get('name'),
+                            "price": result.payload.get('price'),
+                            "score": result.score
                         })
-                    if products:
-                        context_parts.append(f"RELEVANT PRODUCTS: {json.dumps(products, indent=2)}")
-                        sources.append("vector_products")
-                        
+                    context_parts.append(f"RELEVANT PRODUCTS: {json.dumps(products, indent=2)}")
+                    sources.append("vector_products")
             except Exception as e:
                 print(f"Vector search error: {e}")
         
@@ -882,7 +808,6 @@ Response:"""
                 for p in reranked_products[:5]
             ],
         }
-    
     async def search_products_api(self, query: str) -> List[Dict]:
         """Direct product search API endpoint using hybrid search"""
         return await self.hybrid_search(query, limit=10)

@@ -390,25 +390,25 @@ async def chat_with_pdf_base64(bot_id: str, request: Base64PDFRequest):
 
 # UTILITY ENDPOINTS 
 
-@app.get("/api/health")
-async def health_check():
-    """Health check endpoint with bot status"""
-    bot_status = {}
-    for bot_id, bot in bots.items():
-        bot_status[bot_id] = {
-            "name": bot.name,
-            "status": "healthy",
-            "capabilities": get_capabilities(bot),
-            "groq": "connected" if hasattr(bot, 'groq_client') and bot.groq_client else "unknown",
-            "supabase": "connected" if hasattr(bot, 'supabase') and bot.supabase else "unknown"
-        }
+# @app.get("/api/health")
+# async def health_check():
+#     """Health check endpoint with bot status"""
+#     bot_status = {}
+#     for bot_id, bot in bots.items():
+#         bot_status[bot_id] = {
+#             "name": bot.name,
+#             "status": "healthy",
+#             "capabilities": get_capabilities(bot),
+#             "groq": "connected" if hasattr(bot, 'groq_client') and bot.groq_client else "unknown",
+#             "supabase": "connected" if hasattr(bot, 'supabase') and bot.supabase else "unknown"
+#         }
     
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "bots": bot_status,
-        "total_bots": len(bots)
-    }
+#     return {
+#         "status": "healthy",
+#         "timestamp": datetime.now().isoformat(),
+#         "bots": bot_status,
+#         "total_bots": len(bots)
+#     }
 
 @app.get("/api/bots")
 async def list_bots():
@@ -444,6 +444,80 @@ async def get_bot_info(bot_id: str):
         }
     }
 
+@app.get("/api/metrics/{bot_id}")
+async def get_metrics(bot_id: str):
+    """Get performance metrics for a bot"""
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot '{bot_id}' not found")
+    
+    bot = bots[bot_id]
+    if hasattr(bot, 'metrics'):
+        return bot.metrics.get_summary()
+    else:
+        return {"error": "Metrics not available for this bot"}
+
+@app.post("/api/metrics/calculate-accuracy")
+async def calculate_accuracy(bot_id: str):
+    """Calculate retrieval accuracy using test queries"""
+    if bot_id not in bots:
+        raise HTTPException(status_code=404, detail=f"Bot '{bot_id}' not found")
+    
+    bot = bots[bot_id]
+    
+    # Test queries with expected products
+    test_queries = [
+        {"query": "laptop", "expected_keywords": ["Dell", "MacBook", "Lenovo"]},
+        {"query": "headphones", "expected_keywords": ["Sony", "Bose"]},
+        {"query": "wireless mouse", "expected_keywords": ["Logitech", "Mouse"]},
+    ]
+    
+    results = []
+    correct = 0
+    
+    for test in test_queries:
+        result = await bot.chat(test["query"])
+        products = result.get("products", [])
+        product_names = " ".join([p.get("name", "").lower() for p in products])
+        
+        is_correct = any(keyword.lower() in product_names for keyword in test["expected_keywords"])
+        if is_correct:
+            correct += 1
+        
+        results.append({
+            "query": test["query"],
+            "expected": test["expected_keywords"],
+            "found": [p.get("name") for p in products[:3]],
+            "correct": is_correct
+        })
+    
+    accuracy = (correct / len(test_queries)) * 100
+    
+    return {
+        "accuracy": round(accuracy, 2),
+        "total_tests": len(test_queries),
+        "correct": correct,
+        "results": results
+    }
+
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint with metrics"""
+    bot_status = {}
+    for bot_id, bot in bots.items():
+        bot_status[bot_id] = {
+            "name": bot.name,
+            "status": "healthy",
+            "capabilities": get_capabilities(bot),
+        }
+        if hasattr(bot, 'metrics'):
+            bot_status[bot_id]["metrics"] = bot.metrics.get_summary()
+    
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "total_bots": len(bots),
+        "bots": bot_status
+    }
 # WEBSOCKET SUPPORT 
 
 from fastapi import WebSocket, WebSocketDisconnect
